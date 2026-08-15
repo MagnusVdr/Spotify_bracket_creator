@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-from spotify_logic import SpotifyClient
+from spotify_logic import SpotifyClient, load_credentials, save_credentials
 from state_manager import save_state, load_state, restore_bracket, restore_runner, delete_state, has_save
 from playback_manager import PlaybackManager
 from bracket_runner import BracketRunner
@@ -16,31 +16,107 @@ from bracket_widget import BracketView
 from track_list_widget import TrackListWidget
 from settings_widget import SettingsWidget
 
+FIELD_W = 400
 
-# ── Screen 1: Playlist Entry ──────────────────────────────────────────────────
+
+# ── Screen 1: Credentials + Playlist Entry ────────────────────────────────────
 
 class StartScreen(QWidget):
-    def __init__(self, on_start_callback, parent=None):
+    def __init__(self, on_start_callback, on_resume_callback, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         title = QLabel("🎵 Spotify Bracket")
         title.setStyleSheet("font-size: 24px; font-weight: bold;")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
+        layout.addSpacing(8)
 
+        # ── Credentials (pre-filled from credentials.txt if it exists) ──
+        saved_id, saved_secret = load_credentials()
+
+        self.client_id_input = QLineEdit(saved_id or "")
+        self.client_id_input.setPlaceholderText("Spotify Client ID")
+        self.client_id_input.setFixedWidth(FIELD_W)
+        layout.addWidget(self._labeled("Client ID", self.client_id_input),
+                         alignment=Qt.AlignCenter)
+
+        self.client_secret_input = QLineEdit(saved_secret or "")
+        self.client_secret_input.setPlaceholderText("Spotify Client Secret")
+        self.client_secret_input.setFixedWidth(FIELD_W)
+        self.client_secret_input.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self._labeled("Client Secret", self.client_secret_input),
+                         alignment=Qt.AlignCenter)
+
+        self.show_secret_btn = QPushButton("Show secret")
+        self.show_secret_btn.setCheckable(True)
+        self.show_secret_btn.setFixedWidth(110)
+        self.show_secret_btn.setStyleSheet("font-size: 11px; padding: 2px;")
+        self.show_secret_btn.toggled.connect(self._toggle_secret)
+        layout.addWidget(self.show_secret_btn, alignment=Qt.AlignCenter)
+
+        layout.addSpacing(12)
+
+        # ── Playlist ──
         self.playlist_input = QLineEdit()
         self.playlist_input.setPlaceholderText("Paste Spotify playlist link here...")
-        self.playlist_input.setFixedWidth(400)
+        self.playlist_input.setFixedWidth(FIELD_W)
         self.playlist_input.returnPressed.connect(on_start_callback)
-        layout.addWidget(self.playlist_input, alignment=Qt.AlignCenter)
+        layout.addWidget(self._labeled("Playlist link", self.playlist_input),
+                         alignment=Qt.AlignCenter)
+
+        layout.addSpacing(8)
 
         self.start_button = QPushButton("Start")
         self.start_button.setFixedWidth(200)
         self.start_button.clicked.connect(on_start_callback)
         layout.addWidget(self.start_button, alignment=Qt.AlignCenter)
+
+        # ── Resume (only shown when a save file exists) ──
+        self.resume_button = QPushButton("Resume saved bracket")
+        self.resume_button.setFixedWidth(200)
+        self.resume_button.clicked.connect(on_resume_callback)
+        self.resume_button.setVisible(has_save())
+        layout.addWidget(self.resume_button, alignment=Qt.AlignCenter)
+
+        self.hint = QLabel("Credentials are saved to credentials.txt after a successful connection.")
+        self.hint.setStyleSheet("color: #777; font-size: 11px;")
+        self.hint.setAlignment(Qt.AlignCenter)
+        layout.addSpacing(6)
+        layout.addWidget(self.hint)
+
+        # Focus the first empty field
+        if not saved_id:
+            self.client_id_input.setFocus()
+        elif not saved_secret:
+            self.client_secret_input.setFocus()
+        else:
+            self.playlist_input.setFocus()
+
+    @staticmethod
+    def _labeled(text: str, widget: QWidget) -> QWidget:
+        box = QWidget()
+        box.setFixedWidth(FIELD_W)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(3)
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color: #aaa; font-size: 12px; font-weight: bold;")
+        v.addWidget(lbl)
+        v.addWidget(widget)
+        return box
+
+    def _toggle_secret(self, shown: bool):
+        self.client_secret_input.setEchoMode(
+            QLineEdit.Normal if shown else QLineEdit.Password
+        )
+        self.show_secret_btn.setText("Hide secret" if shown else "Show secret")
+
+    def get_credentials(self) -> tuple[str, str]:
+        return (self.client_id_input.text().strip(),
+                self.client_secret_input.text().strip())
 
 
 # ── Screen 2: Bracket Setup ───────────────────────────────────────────────────
@@ -89,20 +165,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Spotify Bracket")
         self.showMaximized()
 
-        self.spotify  = SpotifyClient()
-        self.playback = PlaybackManager(self.spotify)
+        # Spotify client is created only after credentials are entered
+        self.spotify  = None
+        self.playback = PlaybackManager()
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
 
-        self.start_screen   = StartScreen(on_start_callback=self.on_start)
+        self.start_screen   = StartScreen(
+            on_start_callback=self.on_start,
+            on_resume_callback=self.on_resume
+        )
         self.bracket_screen = BracketScreen()
         self.clash_widget   = ClashWidget(
             self.playback,
             self.bracket_screen.settings_widget
         )
         self.clash_widget.clash_resolved.connect(self._on_clash_resolved)
-        # clash_resolved now emits {winner, loser}
 
         self.stack.addWidget(self.start_screen)
         self.stack.addWidget(self.bracket_screen)
@@ -117,13 +196,42 @@ class MainWindow(QMainWindow):
         self.bracket_screen.settings_widget.start_bracket_btn.clicked.connect(self.on_start_bracket)
         self.bracket_screen.track_list_widget.track_removed.connect(self.on_track_removed)
 
-        # Check for saved state on startup
-        if has_save():
-            self._try_restore_save()
+    # ── Credentials ───────────────────────────────────────────────────────────
+
+    def _ensure_client(self) -> bool:
+        """Builds the SpotifyClient from the fields on the start screen."""
+        if self.spotify is not None:
+            return True
+
+        client_id, client_secret = self.start_screen.get_credentials()
+        if not client_id or not client_secret:
+            QMessageBox.warning(
+                self, "Missing credentials",
+                "Please enter both your Spotify Client ID and Client Secret."
+            )
+            return False
+
+        try:
+            client = SpotifyClient(client_id=client_id, client_secret=client_secret)
+            client.verify()  # triggers the OAuth flow now, not mid-bracket
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Spotify login failed",
+                f"Could not connect with those credentials:\n{e}"
+            )
+            return False
+
+        self.spotify = client
+        self.playback.set_spotify_client(client)
+        save_credentials(client_id, client_secret)
+        return True
 
     # ── Spotify load ──────────────────────────────────────────────────────────
 
     def on_start(self):
+        if not self._ensure_client():
+            return
+
         link = self.start_screen.playlist_input.text().strip()
         if not link:
             QMessageBox.warning(self, "Error", "Please enter a playlist link.")
@@ -143,6 +251,11 @@ class MainWindow(QMainWindow):
         self._bracket = build_bracket(tracks)
         self.bracket_screen.load(tracks, self._bracket)
         self.stack.setCurrentWidget(self.bracket_screen)
+
+    def on_resume(self):
+        if not self._ensure_client():
+            return
+        self._try_restore_save()
 
     # ── YouTube ───────────────────────────────────────────────────────────────
 
@@ -211,6 +324,8 @@ class MainWindow(QMainWindow):
     def _try_restore_save(self):
         state = load_state()
         if not state:
+            QMessageBox.information(self, "No save", "No saved bracket was found.")
+            self.start_screen.resume_button.setVisible(False)
             return
         reply = QMessageBox.question(
             self, "Resume bracket?",
@@ -219,6 +334,7 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.No:
             delete_state()
+            self.start_screen.resume_button.setVisible(False)
             return
         try:
             self._tracks  = state["tracks"]
@@ -235,6 +351,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Restore failed", f"Could not restore save:\n{e}")
             delete_state()
+            self.start_screen.resume_button.setVisible(False)
 
 
 if __name__ == "__main__":

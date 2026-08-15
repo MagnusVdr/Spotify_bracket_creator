@@ -10,12 +10,16 @@ DEFAULT_VOLUME = 0.5
 
 
 class PlaybackManager:
-    def __init__(self, spotify_client):
-        self._spotify       = spotify_client
+    def __init__(self, spotify_client=None):
+        self._spotify        = spotify_client
         self._current_source = "spotify"
-        self._current_tmp   = None  # path to temp mp3 for cleanup
-        self._volume        = DEFAULT_VOLUME
+        self._current_tmp    = None  # path to temp mp3 for cleanup
+        self._volume         = DEFAULT_VOLUME
         pygame.mixer.music.set_volume(self._volume)
+
+    def set_spotify_client(self, spotify_client):
+        """Called once the user has entered valid credentials."""
+        self._spotify = spotify_client
 
     def set_volume(self, volume: float):
         """0.0 to 1.0"""
@@ -48,12 +52,17 @@ class PlaybackManager:
     # ── Spotify ──────────────────────────────────────────────────────────────
 
     def _play_spotify(self, track: dict, start_ms: int):
+        if self._spotify is None:
+            print("[Spotify] No client connected yet.")
+            return
         try:
             self._spotify.play_track(track["uri"], start_ms=start_ms)
         except Exception as e:
             print(f"[Spotify] Playback error: {e}")
 
     def _stop_spotify(self):
+        if self._spotify is None:
+            return
         try:
             self._spotify.stop_playback()
         except Exception:
